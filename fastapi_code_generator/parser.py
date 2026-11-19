@@ -48,6 +48,29 @@ from pydantic import BaseModel
 RE_APPLICATION_JSON_PATTERN: Pattern[str] = re.compile(r'^application/.*json$')
 
 
+# Backported from 0.8.1 (CVE-2026-63469, CVE-2026-63470, CVE-2026-63471):
+# OpenAPI values rendered into Python string literals must be escaped so that
+# they cannot break out of the literal in the generated code.
+def _raw_string(value: object) -> str:
+    if isinstance(value, PythonEscapedString):
+        return value.raw
+    return str(value)
+
+
+def _escape_single_quoted_python_string(value: object) -> str:
+    return (
+        _raw_string(value)
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
+def _escape_triple_double_quoted_python_string(value: object) -> str:
+    return _raw_string(value).replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+
+
 class CachedPropertyModel(BaseModel):
     class Config:
         arbitrary_types_allowed = True
@@ -73,6 +96,8 @@ class UsefulStr(str):
 
     @classmethod
     def validate(cls, v: Any) -> Any:
+        if isinstance(v, cls):
+            return v
         return cls(v)
 
     @property
@@ -86,6 +111,32 @@ class UsefulStr(str):
     @property
     def camelcase(self) -> str:
         return stringcase.camelcase(self)
+
+
+class PythonEscapedString(UsefulStr):
+    raw: str
+
+    def __new__(cls, raw: object, escaped: str) -> 'PythonEscapedString':
+        value = str.__new__(cls, escaped)
+        value.raw = _raw_string(raw)
+        return value
+
+    @classmethod
+    def single_quoted(cls, value: object) -> 'PythonEscapedString':
+        return cls(value, _escape_single_quoted_python_string(value))
+
+    @classmethod
+    def triple_double_quoted(cls, value: object) -> 'PythonEscapedString':
+        return cls(value, _escape_triple_double_quoted_python_string(value))
+
+    def __eq__(self, other: object) -> bool:
+        return self.raw == _raw_string(other)
+
+    def __hash__(self) -> int:
+        return hash(self.raw)
+
+    def __repr__(self) -> str:
+        return repr(self.raw)
 
 
 class Argument(CachedPropertyModel):
@@ -124,6 +175,19 @@ class Operation(CachedPropertyModel):
     additional_responses: Dict[str, Dict[str, str]] = {}
     return_type: str = ''
 
+    def __init__(self, **data: Any) -> None:
+        super().__init__(**data)
+        self.path = PythonEscapedString.single_quoted(self.path)
+        if self.summary is not None:
+            self.summary = PythonEscapedString.triple_double_quoted(self.summary)
+        if self.additional_responses:
+            self.additional_responses = {
+                PythonEscapedString.single_quoted(status_code): models
+                for status_code, models in self.additional_responses.items()
+            }
+        if self.tags:
+            self.tags = [PythonEscapedString.single_quoted(tag) for tag in self.tags]
+
     @cached_property
     def type(self) -> UsefulStr:
         """
@@ -133,21 +197,26 @@ class Operation(CachedPropertyModel):
 
     @cached_property
     def root_path(self) -> UsefulStr:
-        paths = self.path.split("/")
+        paths = _raw_string(self.path).split("/")
         return UsefulStr(paths[1] if len(paths) > 1 else '')
 
     @cached_property
     def snake_case_path(self) -> str:
-        return re.sub(
-            r"{([^\}]+)}", lambda m: stringcase.snakecase(m.group()), self.path
+        return PythonEscapedString.single_quoted(
+            self._get_snake_case_path(_raw_string(self.path))
         )
+
+    @staticmethod
+    def _get_snake_case_path(path: str) -> str:
+        return re.sub(r"{([^\}]+)}", lambda m: stringcase.snakecase(m.group()), path)
 
     @cached_property
     def function_name(self) -> str:
         if self.operationId:
             name: str = self.operationId
         else:
-            path = re.sub(r'/{|/', '_', self.snake_case_path).replace('}', '')
+            snake_case_path = self._get_snake_case_path(_raw_string(self.path))
+            path = re.sub(r'/{|/', '_', snake_case_path).replace('}', '')
             name = f"{self.type}{path}"
         return stringcase.snakecase(name)
 
@@ -448,6 +517,6 @@ class OpenAPIParser(OpenAPIModelParser):
         self.operations[resolved_path] = Operation(
             **raw_operation,
             **self._temporary_operation,
-            path=f'/{path_name}',  # type: ignore
-            method=method,  # type: ignore
+            path=f'/{path_name}',
+            method=method,
         )

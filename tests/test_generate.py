@@ -5,6 +5,7 @@ from unittest.mock import call
 import pytest
 from freezegun import freeze_time
 
+import fastapi_code_generator.__main__
 from fastapi_code_generator.__main__ import generate_code
 
 OPEN_API_DEFAULT_TEMPLATE_DIR_NAME = Path('openapi') / 'default_template'
@@ -12,6 +13,10 @@ OPEN_API_SECURITY_TEMPLATE_DIR_NAME = Path('openapi') / 'custom_template_securit
 OPEN_API_REMOTE_REF_DIR_NAME = Path('openapi') / 'remote_ref'
 OPEN_API_DISABLE_TIMESTAMP_DIR_NAME = Path('openapi') / 'disable_timestamp'
 OPEN_API_USING_ROUTERS_DIR_NAME = Path('openapi') / 'using_routers'
+OPEN_API_PYTHON_LITERAL_ESCAPING_DIR_NAME = Path('openapi') / 'python_literal_escaping'
+OPEN_API_PYTHON_LITERAL_ESCAPING_MODULAR_DIR_NAME = (
+    Path('openapi') / 'python_literal_escaping_modular'
+)
 
 DATA_DIR = Path(__file__).parent / 'data'
 
@@ -177,3 +182,63 @@ def test_generate_modify_specific_routers(oas_file):
                 assert output_inner.read_text() == expected_inner.read_text()
         else:
             assert output_file.read_text() == expected_file.read_text()
+
+
+def _assert_same_tree(output_dir: Path, expected_dir: Path) -> None:
+    output_files = sorted(p.relative_to(output_dir) for p in output_dir.rglob('*.py'))
+    expected_files = sorted(
+        p.relative_to(expected_dir) for p in expected_dir.rglob('*.py')
+    )
+    assert output_files == expected_files
+    for relative_path in output_files:
+        assert (output_dir / relative_path).read_text() == (
+            expected_dir / relative_path
+        ).read_text()
+
+
+# Backported from 0.8.1 (CVE-2026-63469, CVE-2026-63470, CVE-2026-63471):
+# path, summary and response status code must stay inside their string literals.
+@pytest.mark.parametrize(
+    "oas_file",
+    (DATA_DIR / OPEN_API_PYTHON_LITERAL_ESCAPING_DIR_NAME).glob("*.yaml"),
+)
+@freeze_time("2020-06-19")
+def test_generate_python_literal_escaping(oas_file):
+    with TemporaryDirectory() as tmp_dir:
+        output_dir = Path(tmp_dir) / oas_file.stem
+        generate_code(
+            input_name=oas_file.name,
+            input_text=oas_file.read_text(),
+            output_dir=output_dir,
+            template_dir=None,
+        )
+        _assert_same_tree(
+            output_dir,
+            EXPECTED_DIR / OPEN_API_PYTHON_LITERAL_ESCAPING_DIR_NAME / oas_file.stem,
+        )
+
+
+@pytest.mark.parametrize(
+    "oas_file",
+    (DATA_DIR / OPEN_API_PYTHON_LITERAL_ESCAPING_DIR_NAME).glob("*.yaml"),
+)
+@freeze_time("2020-06-19")
+def test_generate_modular_python_literal_escaping(oas_file, monkeypatch):
+    # generate_code accumulates router tags in a module-level list; start empty
+    # so tags from other router tests do not leak into this output.
+    monkeypatch.setattr(fastapi_code_generator.__main__, 'all_tags', [])
+    with TemporaryDirectory() as tmp_dir:
+        output_dir = Path(tmp_dir) / oas_file.stem
+        generate_code(
+            input_name=oas_file.name,
+            input_text=oas_file.read_text(),
+            output_dir=output_dir,
+            template_dir=None,
+            generate_routers=True,
+        )
+        _assert_same_tree(
+            output_dir,
+            EXPECTED_DIR
+            / OPEN_API_PYTHON_LITERAL_ESCAPING_MODULAR_DIR_NAME
+            / oas_file.stem,
+        )

@@ -14,6 +14,7 @@ from typing import (
     Pattern,
     Sequence,
     Set,
+    Tuple,
     Type,
     Union,
 )
@@ -137,6 +138,12 @@ class PythonEscapedString(UsefulStr):
 
     def __repr__(self) -> str:
         return repr(self.raw)
+
+    # Not in 0.8.1: copy/deepcopy/pickle call __new__ with these arguments, so
+    # both the raw and the escaped value must be passed back to keep Operation
+    # copyable (deepcopy(operation) raises TypeError without this).
+    def __getnewargs__(self) -> Tuple[str, str]:  # type: ignore[override]
+        return self.raw, str.__str__(self)
 
 
 class Argument(CachedPropertyModel):
